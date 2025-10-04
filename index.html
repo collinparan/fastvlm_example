@@ -21,6 +21,7 @@
     .topbar {
       position:fixed; top:12px; left:16px; right:16px; display:flex; align-items:center; gap:10px;
       pointer-events:none;
+      z-index: 5;
     }
     .chip {
       pointer-events:auto;
@@ -38,20 +39,41 @@
     /* Left: suggestions + input */
     #leftStack {
       position:fixed; left:24px; bottom:24px; display:flex; flex-direction:column; gap:14px; max-width:520px;
+      z-index: 4;
     }
     .panel {
       background:var(--glass); backdrop-filter: blur(var(--blur));
       border-radius:var(--radius); padding:16px 18px; color:#fff;
       box-shadow: 0 4px 30px rgba(0,0,0,.25);
     }
-    .panel h4 { margin:0 0 10px 0; opacity:.9; letter-spacing:.2px; font-weight:700; }
-    .suggestions { display:flex; flex-direction:column; gap:10px; }
+    .panel h4 { margin:0; opacity:.9; letter-spacing:.2px; font-weight:700; }
+
+    /* Collapsible header */
+    .panel-header {
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      margin-bottom:10px;
+    }
+    .collapse-btn {
+      background: transparent;
+      border: 1px solid #ffffff33;
+      color: #fff;
+      width: 28px; height: 28px; border-radius: 8px;
+      cursor: pointer; font-size: 18px; line-height: 0;
+    }
+
+    /* Suggestions list */
+    .suggestions { display:flex; flex-direction:column; gap:10px; max-height: 32vh; overflow: auto; }
     .sugg {
       display:flex; gap:10px; align-items:flex-start; cursor:pointer;
       padding:8px 10px; border-radius:10px;
     }
     .sugg:hover { background:rgba(255,255,255,.08); }
     .arrow { opacity:.7; }
+
+    /* Collapsed state */
+    #suggestionsPanel.collapsed .suggestions { display: none; }
+    #suggestionsPanel.collapsed .panel-header { margin-bottom: 0; }
+
     .promptbar {
       display:flex; align-items:center; gap:10px;
       padding:12px 14px;
@@ -67,6 +89,7 @@
     /* Right: caption card */
     #captionBox {
       position:fixed; right:24px; bottom:24px; width:min(560px, 46vw);
+      z-index: 4;
     }
     .status-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-weight:700; }
     .status-dot { width:8px; height:8px; border-radius:50%; background:var(--accent); }
@@ -97,7 +120,10 @@
   <!-- Left stack: suggestions + editable prompt -->
   <div id="leftStack">
     <div class="panel" id="suggestionsPanel">
-      <h4>Suggested Prompts</h4>
+      <div class="panel-header">
+        <h4>Suggested Prompts</h4>
+        <button id="toggleSuggBtn" class="collapse-btn" aria-label="Toggle suggestions">–</button>
+      </div>
       <div class="suggestions" id="suggList"></div>
     </div>
 
@@ -131,6 +157,8 @@ const statusDot = document.getElementById("statusDot");
 const promptInput = document.getElementById("prompt");
 const sendBtn = document.getElementById("sendBtn");
 const suggList = document.getElementById("suggList");
+const toggleSuggBtn = document.getElementById("toggleSuggBtn");
+const suggestionsPanel = document.getElementById("suggestionsPanel");
 
 /* ---------- Config ---------- */
 const MODEL_ID = "onnx-community/FastVLM-0.5B-ONNX";
@@ -175,12 +203,17 @@ function renderSuggestions() {
     row.innerHTML = `<span class="arrow">↠</span><div>${text}</div>`;
     row.onclick = () => {
       promptInput.value = text;
-      // run immediately with the new prompt
-      tryInfer(text);
+      tryInfer(text); // run immediately with the selected prompt
     };
     suggList.appendChild(row);
   });
 }
+
+/* Collapsible toggle */
+toggleSuggBtn.onclick = () => {
+  suggestionsPanel.classList.toggle("collapsed");
+  toggleSuggBtn.textContent = suggestionsPanel.classList.contains("collapsed") ? "+" : "–";
+};
 
 /* ---------- Video / Model ---------- */
 async function setup() {
@@ -260,7 +293,6 @@ pauseBtn.onclick = () => {
 };
 
 sendBtn.onclick = () => {
-  // Manual ask: one inference immediately (doesn't toggle the loop)
   tryInfer(promptInput.value.trim());
 };
 promptInput.addEventListener("keydown", (e) => {
