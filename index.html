@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>FastVLM – HF-style with Editable Prompt</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    :root {
+      --glass: rgba(0,0,0,.52);
+      --blur: 12px;
+      --radius: 16px;
+      --accent: #3fb950;
+      --danger: #e5534b;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin:0; height:100%; background:#111; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #video { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; background:#000; }
+    #canvas { display:none; }
+
+    /* Top bar */
+    .topbar {
+      position:fixed; top:12px; left:16px; right:16px; display:flex; align-items:center; gap:10px;
+      pointer-events:none;
+    }
+    .chip {
+      pointer-events:auto;
+      display:inline-flex; align-items:center; gap:8px;
+      background:var(--glass); backdrop-filter:blur(var(--blur));
+      border-radius:999px; padding:8px 12px; font-weight:600;
+    }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); }
+    .spacer { flex:1; }
+    .btn { pointer-events:auto; border:none; color:#111; font-weight:600; cursor:pointer;
+      padding:10px 14px; border-radius:999px; background:#c5c7cf; opacity:.85 }
+    .btn.pause { background:#f0b6c0; }
+    .btn.resume { background:#b9f7c6; }
+
+    /* Left: suggestions + input */
+    #leftStack {
+      position:fixed; left:24px; bottom:24px; display:flex; flex-direction:column; gap:14px; max-width:520px;
+    }
+    .panel {
+      background:var(--glass); backdrop-filter: blur(var(--blur));
+      border-radius:var(--radius); padding:16px 18px; color:#fff;
+      box-shadow: 0 4px 30px rgba(0,0,0,.25);
+    }
+    .panel h4 { margin:0 0 10px 0; opacity:.9; letter-spacing:.2px; font-weight:700; }
+    .suggestions { display:flex; flex-direction:column; gap:10px; }
+    .sugg {
+      display:flex; gap:10px; align-items:flex-start; cursor:pointer;
+      padding:8px 10px; border-radius:10px;
+    }
+    .sugg:hover { background:rgba(255,255,255,.08); }
+    .arrow { opacity:.7; }
+    .promptbar {
+      display:flex; align-items:center; gap:10px;
+      padding:12px 14px;
+    }
+    .promptbar input {
+      flex:1; border:none; outline:none; background:transparent; color:#fff; font-size:15px;
+    }
+    .promptbar .send {
+      background:#ffffff20; color:#fff; border:1px solid #ffffff33;
+      border-radius:12px; padding:6px 10px; cursor:pointer;
+    }
+
+    /* Right: caption card */
+    #captionBox {
+      position:fixed; right:24px; bottom:24px; width:min(560px, 46vw);
+    }
+    .status-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-weight:700; }
+    .status-dot { width:8px; height:8px; border-radius:50%; background:var(--accent); }
+    #out { white-space:pre-wrap; line-height:1.4; font-size:16px; opacity:.95; }
+
+    @media (max-width: 900px) {
+      #leftStack { max-width:420px; }
+      #captionBox { width: calc(100vw - 48px); }
+    }
+  </style>
+
+  <!-- transformers.js for browser -->
+  <script type="importmap">
+  { "imports": { "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2" } }
+  </script>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="chip"><span class="dot" id="liveDot"></span> Live</div>
+    <div class="spacer"></div>
+    <button id="pauseBtn" class="btn pause">Pause</button>
+  </div>
+
+  <!-- Left stack: suggestions + editable prompt -->
+  <div id="leftStack">
+    <div class="panel" id="suggestionsPanel">
+      <h4>Suggested Prompts</h4>
+      <div class="suggestions" id="suggList"></div>
+    </div>
+
+    <div class="panel promptbar">
+      <input id="prompt" placeholder="Describe what you see in one sentence." />
+      <button class="send" id="sendBtn">Ask</button>
+    </div>
+  </div>
+
+  <!-- Right: caption card -->
+  <div id="captionBox" class="panel">
+    <div class="status-row"><span class="status-dot" id="statusDot"></span> <span><b>Live Caption</b></span></div>
+    <div id="out">Loading model…</div>
+  </div>
+
+<script type="module">
+import {
+  AutoProcessor,
+  AutoModelForImageTextToText,
+  RawImage,
+  TextStreamer,
+  env
+} from "@huggingface/transformers";
+
+/* ---------- DOM ---------- */
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const out = document.getElementById("out");
+const pauseBtn = document.getElementById("pauseBtn");
+const statusDot = document.getElementById("statusDot");
+const promptInput = document.getElementById("prompt");
+const sendBtn = document.getElementById("sendBtn");
+const suggList = document.getElementById("suggList");
+
+/* ---------- Config ---------- */
+const MODEL_ID = "onnx-community/FastVLM-0.5B-ONNX";
+const POLL_MS_DEFAULT = 1500;
+const SUGGESTIONS = [
+  "Describe what you see in one sentence.",
+  "What is the color of my shirt?",
+  "Identify any text or written content visible.",
+  "What emotions or actions are being portrayed?",
+  "Name the object I am holding in my hand."
+];
+
+/* ---------- State ---------- */
+env.allowLocalModels = false;
+let processor, model, stream;
+let intervalId = null;
+let running = true;
+let lock = false;
+let pollMs = POLL_MS_DEFAULT;
+
+/* ---------- UI Helpers ---------- */
+function setRunningUI(on) {
+  running = on;
+  pauseBtn.textContent = on ? "Pause" : "Resume";
+  pauseBtn.classList.toggle("pause", on);
+  pauseBtn.classList.toggle("resume", !on);
+  statusDot.style.background = on ? "#3fb950" : "#c9c9c9";
+}
+
+function ensureLoop() {
+  if (intervalId) { clearInterval(intervalId); intervalId = null; }
+  if (running) {
+    intervalId = setInterval(() => tryInfer(promptInput.value.trim()), pollMs);
+  }
+}
+
+function renderSuggestions() {
+  suggList.innerHTML = "";
+  SUGGESTIONS.forEach(text => {
+    const row = document.createElement("div");
+    row.className = "sugg";
+    row.innerHTML = `<span class="arrow">↠</span><div>${text}</div>`;
+    row.onclick = () => {
+      promptInput.value = text;
+      // run immediately with the new prompt
+      tryInfer(text);
+    };
+    suggList.appendChild(row);
+  });
+}
+
+/* ---------- Video / Model ---------- */
+async function setup() {
+  if (!('gpu' in navigator)) {
+    out.textContent = "WebGPU not available. Use recent Chrome/Edge or Safari TP.";
+    return;
+  }
+
+  out.textContent = "Loading processor…";
+  processor = await AutoProcessor.from_pretrained(MODEL_ID);
+
+  out.textContent = "Loading model (WebGPU)…";
+  model = await AutoModelForImageTextToText.from_pretrained(MODEL_ID, {
+    device: "webgpu",
+    dtype: { embed_tokens: "fp16", vision_encoder: "q4", decoder_model_merged: "q4" }
+  });
+
+  stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  video.srcObject = stream;
+  await video.play();
+
+  out.textContent = "Ready.";
+  renderSuggestions();
+  setRunningUI(true);
+  ensureLoop();
+}
+
+function grabFrame() {
+  if (!video.videoWidth) return null;
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d"); ctx.drawImage(video, 0, 0);
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+/* ---------- Inference ---------- */
+async function tryInfer(promptText) {
+  if (!running || lock) return;
+  lock = true;
+
+  try {
+    const frame = grabFrame();
+    if (!frame) { lock = false; return; }
+    const img = new RawImage(frame.data, frame.width, frame.height, 4);
+
+    const messages = [
+      { role: "system", content: "You are a helpful visual AI assistant. Respond concisely." },
+      { role: "user", content: `<image>${promptText || "Describe what you see in one sentence."}` }
+    ];
+    const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true });
+    const inputs = await processor(img, prompt, { add_special_tokens: false });
+
+    let text = "";
+    const streamer = new TextStreamer(processor.tokenizer, {
+      skip_prompt: true, skip_special_tokens: true,
+      callback_function: t => { text += t; out.textContent = text; }
+    });
+
+    await model.generate({
+      ...inputs,
+      max_new_tokens: 96,
+      do_sample: false,
+      repetition_penalty: 1.2,
+      streamer
+    });
+  } catch (e) {
+    out.textContent = "Error: " + (e?.message || e);
+  } finally {
+    lock = false;
+  }
+}
+
+/* ---------- Events ---------- */
+pauseBtn.onclick = () => {
+  setRunningUI(!running);
+  ensureLoop();
+  if (running) tryInfer(promptInput.value.trim());
+};
+
+sendBtn.onclick = () => {
+  // Manual ask: one inference immediately (doesn't toggle the loop)
+  tryInfer(promptInput.value.trim());
+};
+promptInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    tryInfer(promptInput.value.trim());
+  }
+});
+
+/* ---------- Boot ---------- */
+setup();
+
+/* ---------- Cleanup ---------- */
+window.addEventListener("beforeunload", () => {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (intervalId) clearInterval(intervalId);
+});
+</script>
+</body>
+</html>
